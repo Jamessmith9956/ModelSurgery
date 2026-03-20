@@ -46,3 +46,31 @@ This repo contains a Jupyter notebook (`vllm_cookbook.ipynb`) for running NVIDIA
   python test_small_model.py
   ```
   This runs the repeated-layer quality benchmark on `gpt2` and prints KL/NLL metrics.
+
+---
+
+## Nemotron layer grid sweep (CLI)
+
+Script: [`nemotron_layer_grid_sweep.py`](nemotron_layer_grid_sweep.py)
+
+1. **Smoke test only** (checks `forward_control_no_repeat`, `forward_repeating_layers`, and one `benchmark_repeated_layers_quality` call):
+   ```bash
+   python nemotron_layer_grid_sweep.py --model-id nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 --trust-remote-code --smoke-only
+   ```
+   Use `--model-id gpt2` for a fast local check.
+
+2. **Full grid** over all `(i, j)` with `0 <= i <= j < n_layers` (writes JSONL: first line `meta`, then one `result` per pair):
+   ```bash
+   python nemotron_layer_grid_sweep.py \
+     --model-id nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 \
+     --trust-remote-code \
+     --output layer_grid_results.jsonl \
+     --extra-passes 1
+   ```
+   - Set `HF_TOKEN` (or `HUGGING_FACE_HUB_TOKEN`) if the model is gated.
+   - On GPU, weights use `device_map="auto"` (multi-GPU friendly).
+   - **`--short-prompts`**: one short prompt (much faster on huge models).
+   - **`--limit-pairs N`**: stop after N pairs (debugging).
+   - Full sweep is **O(n_layers²)**; large models can take a long time.
+
+3. **Google Colab**: upload or clone the repo, install deps (`pip install torch transformers`), then run the same commands in a cell with `!python nemotron_layer_grid_sweep.py ...`. Use an **H100 / A100** runtime and enough disk for the checkpoint; **G4** is usually too small for 120B weights.

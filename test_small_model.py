@@ -162,13 +162,17 @@ def continuation_nll(logits: torch.Tensor, input_ids: torch.Tensor, *, prompt_le
 def benchmark_repeated_layers_quality(
     *,
     model_name: str = "gpt2",
+    model: Optional[torch.nn.Module] = None,
+    tokenizer=None,
     device: str | None = None,
     prompts: List[str] | None = None,
     reference_continuation: str = "\nThe answer is:",
     i: int = 2,
     j: int = 4,
     extra_passes: int = 2,
+    trust_remote_code: bool = False,
 ) -> Dict[str, float]:
+    """If ``model`` and ``tokenizer`` are passed, they are reused (no ``from_pretrained``)."""
     if prompts is None:
         prompts = [
             "Explain in one sentence what a KV cache is.",
@@ -177,19 +181,26 @@ def benchmark_repeated_layers_quality(
             "2+2=",
         ]
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    dtype = torch.float32
-    if device == "cuda":
-        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype).to(device)
+    if model is None:
+        dtype = torch.float32
+        if device == "cuda":
+            dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+            trust_remote_code=trust_remote_code,
+        ).to(device)
     full_texts = [p + reference_continuation for p in prompts]
     enc_full = tokenizer(full_texts, return_tensors="pt", padding=True)
     enc_prompt = tokenizer(prompts, return_tensors="pt", padding=True)
-    input_ids = enc_full["input_ids"].to(device)
-    attention_mask = enc_full["attention_mask"].to(device)
-    prompt_lens = enc_prompt["attention_mask"].sum(dim=1).to(device)
+    input_device = next(model.parameters()).device
+    input_ids = enc_full["input_ids"].to(input_device)
+    attention_mask = enc_full["attention_mask"].to(input_device)
+    prompt_lens = enc_prompt["attention_mask"].sum(dim=1).to(input_device)
     model.eval()
     with torch.no_grad():
         logits_control = forward_control_no_repeat(model, input_ids, attention_mask=attention_mask)
