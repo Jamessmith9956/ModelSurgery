@@ -18,12 +18,16 @@ Usage:
 
   # Quick smoke only
   python nemotron_layer_grid_sweep.py --model-id gpt2 --smoke-only
+
+  # Verify GPU count and disk before loading 120B (no model load)
+  python nemotron_layer_grid_sweep.py --check-env --min-gpus 4
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -66,6 +70,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--smoke-only", action="store_true", help="Smoke tests only; no grid")
     p.add_argument("--limit-pairs", type=int, default=0, help="Stop after N (i,j) pairs (0 = no limit)")
     p.add_argument("--short-prompts", action="store_true", help="Single short prompt (faster)")
+    p.add_argument(
+        "--check-env",
+        action="store_true",
+        help="Print CUDA device count, names, HF cache paths, disk free; exit without loading a model",
+    )
+    p.add_argument(
+        "--min-gpus",
+        type=int,
+        default=0,
+        help="With --check-env, exit with status 1 if torch.cuda.device_count() < this (0 = no check)",
+    )
     return p.parse_args()
 
 
@@ -74,6 +89,31 @@ def _dtype_kw(args: argparse.Namespace) -> Dict[str, Any]:
         return {}
     m = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
     return {"torch_dtype": m[args.dtype]}
+
+
+def check_environment(args: argparse.Namespace) -> int:
+    """Print CUDA / cache / disk info; optional exit 1 if too few GPUs."""
+    n = torch.cuda.device_count()
+    print(f"torch.cuda.device_count(): {n}")
+    print(f"torch.cuda.is_available(): {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        for i in range(n):
+            print(f"  cuda:{i} {torch.cuda.get_device_name(i)}")
+    hf_home = os.environ.get("HF_HOME") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+    hub = os.environ.get("HUGGING_FACE_HUB_CACHE") or os.path.join(hf_home, "hub")
+    print(f"HF_HOME (default if unset): {hf_home}")
+    print(f"HUGGING_FACE_HUB_CACHE (default if unset): {hub}")
+    for path in (hf_home, hub):
+        try:
+            usage = shutil.disk_usage(path)
+            free_gb = usage.free / (1024**3)
+            print(f"Disk free on {path}: {free_gb:.1f} GiB")
+        except OSError as e:
+            print(f"Disk usage for {path}: ({e})")
+    if args.min_gpus > 0 and n < args.min_gpus:
+        print(f"ERROR: need >= {args.min_gpus} GPUs, have {n}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def load_model_and_tokenizer(args: argparse.Namespace):
@@ -85,6 +125,18 @@ def load_model_and_tokenizer(args: argparse.Namespace):
     kwargs.update(_dtype_kw(args))
     if torch.cuda.is_available():
         kwargs["device_map"] = "auto"
+
+    if "nvfp4" in args.model_id.lower():
+        raise RuntimeError(
+            "NVFP4 is not supported for this Transformers load path: checkpoint Linear weights are "
+            "packed (e.g. shape [1024, 1344]) but the model is instantiated with full "
+            "intermediate_size (e.g. [1024, 2688]).\n\n"
+            "For nemotron_layer_grid_sweep.py / manual layer repeats, use a BF16 or FP8 checkpoint, e.g.:\n"
+            "  nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16\n"
+            "  (or the FP8 model id from NVIDIA on Hugging Face).\n\n"
+            "NVFP4 checkpoints are intended for vLLM / sglang (see the model README), not plain "
+            "AutoModelForCausalLM.from_pretrained here."
+        )
 
     model = AutoModelForCausalLM.from_pretrained(args.model_id, **kwargs)
     model.eval()
@@ -152,6 +204,9 @@ def main() -> int:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token:
         os.environ["HUGGING_FACE_HUB_TOKEN"] = token
+
+    if args.check_env:
+        return check_environment(args)
 
     prompts: List[str]
     if args.short_prompts:

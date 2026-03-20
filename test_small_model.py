@@ -62,6 +62,19 @@ def _call_layer(layer: torch.nn.Module, hidden_states: torch.Tensor, **kwargs):
     return layer(hidden_states, **filtered)
 
 
+def _maybe_rotary_position_embeddings(
+    model: torch.nn.Module, hidden_states: torch.Tensor, position_ids: torch.Tensor
+) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+    """Llama 4.57+: ``LlamaModel`` passes ``(cos, sin)`` from ``rotary_emb`` into each layer.
+
+    GPT-2 and other stacks have no ``model.rotary_emb``; returns ``None``.
+    """
+    inner = getattr(model, "model", None)
+    if inner is None or not hasattr(inner, "rotary_emb"):
+        return None
+    return inner.rotary_emb(hidden_states, position_ids)
+
+
 def forward_control_no_repeat(
     model: torch.nn.Module,
     input_ids: torch.Tensor,
@@ -79,12 +92,17 @@ def forward_control_no_repeat(
         pos_mask = attention_mask.squeeze(1).squeeze(1) if attention_mask.dim() == 4 else attention_mask
         position_ids = (pos_mask.cumsum(-1) - 1).clamp(min=0)
     hidden_states = stack.embed_tokens(input_ids)
+    cache_position = torch.arange(input_ids.size(1), device=input_ids.device)
     layer_kwargs = {
         "attention_mask": attention_mask,
         "position_ids": position_ids,
+        "cache_position": cache_position,
         "use_cache": False,
         "output_attentions": False,
     }
+    rope = _maybe_rotary_position_embeddings(model, hidden_states, position_ids)
+    if rope is not None:
+        layer_kwargs["position_embeddings"] = rope
     for layer in layers:
         out = _call_layer(layer, hidden_states, **layer_kwargs)
         hidden_states = out[0] if isinstance(out, (tuple, list)) else out
@@ -125,6 +143,9 @@ def forward_repeating_layers(
         "use_cache": False,
         "output_attentions": False,
     }
+    rope = _maybe_rotary_position_embeddings(model, hidden_states, position_ids)
+    if rope is not None:
+        layer_kwargs["position_embeddings"] = rope
     for idx in range(0, j + 1):
         out = _call_layer(layers[idx], hidden_states, **layer_kwargs)
         hidden_states = out[0] if isinstance(out, (tuple, list)) else out
