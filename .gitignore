@@ -75,6 +75,10 @@ docs/_build/
 .pybuilder/
 target/
 
+# Layer grid sweep outputs
+layer_grid_results.jsonl
+*_layer_grid*.jsonl
+
 # Jupyter Notebook
 .ipynb_checkpoints
 
